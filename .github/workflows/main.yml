@@ -1,0 +1,957 @@
+name: Build Smart Expense Tree APK & Web
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-app:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 1. Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 2. Generate App Source Files (www/index.html)
+        run: |
+          mkdir -p www
+          cat << 'EOF_HTML' > www/index.html
+          <!DOCTYPE html>
+          <html lang="ko">
+          <head>
+            <meta charset="UTF-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+            <meta name="theme-color" content="#0f172a" />
+            <title>스마트 지출 가계도 — 캡처OCR · 카톡알림 · 월말평가</title>
+            <script src="https://cdn.tailwindcss.com"></script>
+            <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+            <style>
+              @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css');
+              body { font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, sans-serif; background: #f1f5f9; color: #0f172a; -webkit-tap-highlight-color: transparent; }
+              .tree-line-v { width: 2px; background: #cbd5e1; margin: 0 auto; }
+              .node-card { transition: all 0.16s ease; cursor: pointer; }
+              .node-card:hover, .node-card:active { transform: translateY(-2px); box-shadow: 0 8px 20px -4px rgba(15,23,42,0.14); border-color: #6366f1; }
+            </style>
+          </head>
+          <body class="min-h-screen pb-24">
+            <!-- 상단 헤더 -->
+            <header class="bg-slate-900 text-white sticky top-0 z-30 shadow-md">
+              <div class="max-w-5xl mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-2">
+                <div class="flex items-center gap-2.5">
+                  <div class="w-9 h-9 rounded-xl bg-indigo-500 flex items-center justify-center text-lg font-bold shadow">🌳</div>
+                  <div>
+                    <h1 class="text-base sm:text-lg font-extrabold tracking-tight">스마트 지출 가계도</h1>
+                    <p class="text-[11px] text-slate-300">캡처 OCR · 카톡 알림 사용처 인식 · 가계도 수정 · 월말 평가</p>
+                  </div>
+                </div>
+                <div class="flex items-center gap-2">
+                  <input id="monthPicker" type="month" class="bg-slate-800 text-white text-xs rounded-lg px-2.5 py-1.5 border border-slate-700" onchange="renderAll()" />
+                  <button onclick="openBudgetModal()" class="bg-slate-800 hover:bg-slate-700 text-xs px-2.5 py-1.5 rounded-lg border border-slate-700 font-semibold">💰 예산설정</button>
+                  <button onclick="triggerLastDaySimulation()" class="bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs px-2.5 py-1.5 rounded-lg font-bold shadow">📊 말일 평가보기</button>
+                </div>
+              </div>
+            </header>
+
+            <!-- 매월 마지막 날 자동 알림 배너 -->
+            <div id="lastDayBanner" class="hidden bg-gradient-to-r from-amber-500 via-orange-500 to-rose-500 text-white px-4 py-3 shadow-md">
+              <div class="max-w-5xl mx-auto flex flex-wrap items-center justify-between gap-2">
+                <div class="flex items-center gap-2 text-xs sm:text-sm font-bold">
+                  <span class="text-lg">🔔</span>
+                  <span id="lastDayBannerText">오늘은 이번 달 마지막 날입니다! 이번 달 지출 가계도 종합 평가와 다음 달 보완할 점을 확인하세요.</span>
+                </div>
+                <button onclick="switchTab('eval')" class="bg-white text-slate-900 text-xs font-extrabold px-3 py-1.5 rounded-lg shadow">지금 평가 리포트 열기 →</button>
+              </div>
+            </div>
+
+            <main class="max-w-5xl mx-auto px-4 pt-4 space-y-4">
+              <!-- 상단 요약 카드 -->
+              <section class="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                <div class="bg-white rounded-2xl p-3.5 shadow-sm border border-slate-200">
+                  <p class="text-[11px] text-slate-500 font-semibold">이번 달 총 지출</p>
+                  <p id="statTotal" class="text-lg sm:text-xl font-black text-slate-900 mt-0.5">₩0</p>
+                  <p id="statBudgetSub" class="text-[11px] text-slate-500 mt-1">목표 예산: ₩600,000</p>
+                </div>
+                <div class="bg-white rounded-2xl p-3.5 shadow-sm border border-slate-200">
+                  <p class="text-[11px] text-slate-500 font-semibold">예산 소진율</p>
+                  <p id="statRatio" class="text-lg sm:text-xl font-black text-indigo-600 mt-0.5">0%</p>
+                  <div class="w-full bg-slate-100 h-1.5 rounded-full mt-2 overflow-hidden">
+                    <div id="statProgress" class="bg-indigo-600 h-full rounded-full" style="width:0%"></div>
+                  </div>
+                </div>
+                <div class="bg-white rounded-2xl p-3.5 shadow-sm border border-slate-200">
+                  <p class="text-[11px] text-slate-500 font-semibold">최다 지출 사용처 (어디에)</p>
+                  <p id="statTopMerchant" class="text-sm sm:text-base font-extrabold text-rose-600 mt-0.5 truncate">-</p>
+                  <p id="statTopMerchantAmt" class="text-[11px] text-slate-500 mt-1">₩0</p>
+                </div>
+                <div class="bg-white rounded-2xl p-3.5 shadow-sm border border-slate-200">
+                  <p class="text-[11px] text-slate-500 font-semibold">월말 지출 평가 점수</p>
+                  <p id="statScore" class="text-lg sm:text-xl font-black text-emerald-600 mt-0.5">- 점</p>
+                  <p id="statGrade" class="text-[11px] text-slate-500 mt-1">평가 탭에서 보완점 확인</p>
+                </div>
+              </section>
+
+              <!-- 네비게이션 탭 -->
+              <nav class="grid grid-cols-4 gap-1.5 bg-slate-200/80 p-1.5 rounded-2xl">
+                <button id="tabBtn-tree" onclick="switchTab('tree')" class="py-2 rounded-xl text-xs sm:text-sm font-extrabold bg-white text-indigo-600 shadow-sm">🌳 지출 가계도</button>
+                <button id="tabBtn-capture" onclick="switchTab('capture')" class="py-2 rounded-xl text-xs sm:text-sm font-bold text-slate-600">📸 캡처 업로드</button>
+                <button id="tabBtn-kakao" onclick="switchTab('kakao')" class="py-2 rounded-xl text-xs sm:text-sm font-bold text-slate-600">💬 카톡 알림인식</button>
+                <button id="tabBtn-eval" onclick="switchTab('eval')" class="py-2 rounded-xl text-xs sm:text-sm font-bold text-slate-600">📊 월말평가·보완</button>
+              </nav>
+
+              <!-- [탭 1] 시각적 지출 가계도 & 직접 수정 -->
+              <section id="panel-tree" class="space-y-4">
+                <div class="bg-white rounded-2xl p-4 shadow-sm border border-slate-200">
+                  <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
+                    <div>
+                      <h2 class="text-base font-extrabold text-slate-900">🌳 내 돈의 지출 가계도 (클릭하여 직접 수정)</h2>
+                      <p class="text-xs text-slate-500">총 지출 → 카테고리 가지 → <b>어디에 지출하였는지(사용처)</b> 구조입니다. 각 노드를 누르면 바로 수정·삭제됩니다.</p>
+                    </div>
+                    <button onclick="openEditModal(null)" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold px-3 py-2 rounded-xl shadow">+ 가계도에 직접 추가</button>
+                  </div>
+
+                  <!-- 가계도 트리 루트 + 가지 렌더링 영역 -->
+                  <div id="treeContainer" class="bg-slate-50 rounded-2xl p-4 border border-slate-200 overflow-x-auto"></div>
+                </div>
+
+                <!-- 어디에 지출하였는지 (사용처별 랭킹 & 상세 리스트) -->
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div class="bg-white rounded-2xl p-4 shadow-sm border border-slate-200">
+                    <h3 class="text-sm font-extrabold text-slate-900 mb-2">📍 어디에 지출하였는지 (사용처 TOP)</h3>
+                    <div id="merchantRankList" class="space-y-2 text-xs"></div>
+                  </div>
+                  <div class="md:col-span-2 bg-white rounded-2xl p-4 shadow-sm border border-slate-200">
+                    <div class="flex items-center justify-between mb-2">
+                      <h3 class="text-sm font-extrabold text-slate-900">📋 지출 내역 장부 (터치하여 가계도 수정)</h3>
+                      <span class="text-[11px] text-slate-400">항목 클릭 시 수정 창 열림</span>
+                    </div>
+                    <div id="ledgerList" class="space-y-2 max-h-96 overflow-y-auto pr-1"></div>
+                  </div>
+                </div>
+              </section>
+
+              <!-- [탭 2] 캡처 이미지 업로드 OCR 자동 인식 -->
+              <section id="panel-capture" class="hidden space-y-4">
+                <div class="bg-white rounded-2xl p-4 shadow-sm border border-slate-200 space-y-3">
+                  <h2 class="text-base font-extrabold text-slate-900">📸 결제·영수증·카톡 캡처 업로드 → 가계도 자동 등록</h2>
+                  <p class="text-xs text-slate-500">캡처 이미지를 올리면 한국어 OCR 엔진이 글자를 읽어 <b>어디에 지출했는지(사용처), 금액, 날짜, 카테고리</b>를 인식해 가계도에 업로드합니다.</p>
+
+                  <label class="block border-2 border-dashed border-indigo-300 hover:border-indigo-500 bg-indigo-50/50 rounded-2xl p-6 text-center cursor-pointer transition">
+                    <input id="captureInput" type="file" accept="image/*" class="hidden" onchange="handleCaptureUpload(event)" />
+                    <div class="text-3xl mb-1">📷</div>
+                    <p class="text-sm font-extrabold text-indigo-900">터치하여 캡처 이미지 선택 (갤러리 / 스크린샷)</p>
+                    <p class="text-xs text-indigo-600 mt-1">카드 결제 화면, 배달앱 영수증, 카톡 결제 캡처 모두 가능</p>
+                  </label>
+
+                  <div class="flex flex-wrap gap-2 pt-1">
+                    <button onclick="runSampleOcr('스타벅스 역삼점', 12800, '식비/카페')" class="bg-slate-100 hover:bg-slate-200 text-xs font-bold px-3 py-1.5 rounded-lg">🧪 샘플 캡처 1 (스타벅스 12,800원)</button>
+                    <button onclick="runSampleOcr('쿠팡 로켓배송', 43500, '쇼핑/생활')" class="bg-slate-100 hover:bg-slate-200 text-xs font-bold px-3 py-1.5 rounded-lg">🧪 샘플 캡처 2 (쿠팡 43,500원)</button>
+                    <button onclick="runSampleOcr('GS25 강남역점', 6900, '편의점/마트')" class="bg-slate-100 hover:bg-slate-200 text-xs font-bold px-3 py-1.5 rounded-lg">🧪 샘플 캡처 3 (GS25 6,900원)</button>
+                  </div>
+
+                  <div id="ocrStatusBox" class="hidden bg-slate-900 text-white rounded-xl p-3 text-xs space-y-2">
+                    <div class="flex items-center justify-between">
+                      <span id="ocrStatusText" class="font-bold text-amber-300">🔍 캡처 이미지 글자 인식 중...</span>
+                      <span id="ocrPctText">0%</span>
+                    </div>
+                    <div class="w-full bg-slate-700 h-1.5 rounded-full overflow-hidden">
+                      <div id="ocrProgressBar" class="bg-amber-400 h-full" style="width:0%"></div>
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <!-- [탭 3] 카톡 알림 인식 (안드로이드 실시간 연동 + 텍스트 파서) -->
+              <section id="panel-kakao" class="hidden space-y-4">
+                <!-- 안드로이드 네이티브 알림 리스너 연동 카드 -->
+                <div class="bg-amber-50 border border-amber-200 rounded-2xl p-4 space-y-2.5">
+                  <div class="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <span class="inline-block bg-amber-400 text-slate-950 text-[10px] font-black px-2 py-0.5 rounded-full">ANDROID 실시간 카톡 감지</span>
+                      <h3 class="text-sm font-extrabold text-slate-900 mt-1">📲 스마트폰 상단바 카카오톡·카드 결제 알림 자동 인식</h3>
+                      <p id="androidPermStatus" class="text-xs text-slate-600">앱 설치 후 알림 접근 권한을 켜면 카톡 결제 알림이 올 때마다 어디에 지출했는지 자동 기록됩니다.</p>
+                    </div>
+                    <div class="flex gap-1.5">
+                      <button onclick="openAndroidNotifPermission()" class="bg-slate-900 text-white text-xs font-bold px-3 py-2 rounded-xl">⚙️ 알림 권한 켜기</button>
+                      <button onclick="pullAndroidNotifications(true)" class="bg-amber-400 text-slate-950 text-xs font-extrabold px-3 py-2 rounded-xl">🔄 상단바 카톡 스캔</button>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 카톡 알림톡 텍스트 붙여넣기 인식 -->
+                <div class="bg-white rounded-2xl p-4 shadow-sm border border-slate-200 space-y-3">
+                  <h2 class="text-base font-extrabold text-slate-900">💬 카카오톡 결제 알림 내용 인식 → 사용처 & 가계도 반영</h2>
+                  <p class="text-xs text-slate-500">카카오페이·KB국민·신한·우리·현대·토스 등 카톡 알림 메시지를 붙여넣으면 <b>어디에 지출하였는지(사용처)</b>와 금액을 추출해 가계도에 바로 올립니다.</p>
+
+                  <textarea id="kakaoInput" rows="4" class="w-full rounded-xl border border-slate-300 p-3 text-xs focus:outline-none focus:border-indigo-500" placeholder="[카카오페이] 결제 완료 안내&#10;- 결제금액: 24,000원&#10;- 가맹점: 배달의민족(우아한형제들)&#10;- 결제일시: 2026-11-06 19:30"></textarea>
+
+                  <div class="flex flex-wrap items-center justify-between gap-2">
+                    <div class="flex flex-wrap gap-1.5">
+                      <button onclick="fillSampleKakao(1)" class="bg-yellow-100 hover:bg-yellow-200 text-yellow-900 text-xs font-bold px-2.5 py-1.5 rounded-lg">카톡 예시 1: 배달의민족</button>
+                      <button onclick="fillSampleKakao(2)" class="bg-yellow-100 hover:bg-yellow-200 text-yellow-900 text-xs font-bold px-2.5 py-1.5 rounded-lg">카톡 예시 2: 올리브영</button>
+                      <button onclick="fillSampleKakao(3)" class="bg-yellow-100 hover:bg-yellow-200 text-yellow-900 text-xs font-bold px-2.5 py-1.5 rounded-lg">카톡 예시 3: 카카오T 택시</button>
+                    </div>
+                    <button onclick="parseAndAddKakao()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-extrabold px-4 py-2 rounded-xl shadow">💬 카톡 알림 인식 & 가계도 업로드</button>
+                  </div>
+                </div>
+              </section>
+
+              <!-- [탭 4] 매월 마지막 날 지출 평가 & 보완점 리포트 -->
+              <section id="panel-eval" class="hidden space-y-4">
+                <div class="bg-white rounded-2xl p-4 shadow-sm border border-slate-200 space-y-4">
+                  <div class="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
+                    <div>
+                      <span id="evalBadge" class="inline-block bg-indigo-100 text-indigo-700 text-[11px] font-extrabold px-2.5 py-0.5 rounded-full">매월 말일 자동 평가 엔진</span>
+                      <h2 class="text-base sm:text-lg font-extrabold text-slate-900 mt-1">📊 월말 지출 종합 평가 및 다음 달 보완할 점</h2>
+                    </div>
+                    <div class="text-right">
+                      <p class="text-[11px] text-slate-400">이달의 지출 관리 점수</p>
+                      <p id="evalBigScore" class="text-2xl font-black text-indigo-600">90점 (A등급)</p>
+                    </div>
+                  </div>
+
+                  <!-- 카테고리별 권장 비중 대비 진단 -->
+                  <div>
+                    <h3 class="text-xs font-extrabold text-slate-700 uppercase tracking-wider mb-2">1️⃣ 카테고리별 지출 비중 평가</h3>
+                    <div id="evalCategoryBars" class="space-y-2.5"></div>
+                  </div>
+
+                  <!-- 구체적인 보완할 점 & 액션 플랜 -->
+                  <div>
+                    <h3 class="text-xs font-extrabold text-slate-700 uppercase tracking-wider mb-2">2️⃣ AI 지출 코치의 맞춤형 보완할 점 (Action Plan)</h3>
+                    <div id="evalTipsList" class="space-y-2 text-xs"></div>
+                  </div>
+                </div>
+              </section>
+            </main>
+
+            <!-- 가계도 직접 수정 / 추가 모달 -->
+            <div id="editModal" class="fixed inset-0 bg-slate-950/60 z-50 hidden items-center justify-center p-4">
+              <div class="bg-white rounded-2xl max-w-md w-full p-5 space-y-3 shadow-2xl">
+                <div class="flex items-center justify-between">
+                  <h3 id="modalTitle" class="text-base font-extrabold text-slate-900">✏️ 가계도 내역 수정</h3>
+                  <button onclick="closeEditModal()" class="text-slate-400 hover:text-slate-600 text-lg font-bold">✕</button>
+                </div>
+                <input type="hidden" id="editId" />
+                <div class="space-y-2.5 text-xs">
+                  <div>
+                    <label class="font-bold text-slate-700 block mb-1">어디에 지출하였는지 (사용처 / 가맹점명)</label>
+                    <input id="editMerchant" type="text" class="w-full border border-slate-300 rounded-xl px-3 py-2 font-semibold" placeholder="예: 스타벅스 역삼점, 배달의민족" />
+                  </div>
+                  <div class="grid grid-cols-2 gap-2">
+                    <div>
+                      <label class="font-bold text-slate-700 block mb-1">지출 금액 (원)</label>
+                      <input id="editAmount" type="number" class="w-full border border-slate-300 rounded-xl px-3 py-2 font-semibold" placeholder="15000" />
+                    </div>
+                    <div>
+                      <label class="font-bold text-slate-700 block mb-1">결제 날짜</label>
+                      <input id="editDate" type="date" class="w-full border border-slate-300 rounded-xl px-3 py-2 font-semibold" />
+                    </div>
+                  </div>
+                  <div>
+                    <label class="font-bold text-slate-700 block mb-1">가계도 카테고리 가지 선택</label>
+                    <select id="editCategory" class="w-full border border-slate-300 rounded-xl px-3 py-2 font-semibold">
+                      <option value="식비/카페">🍽️ 식비/카페</option>
+                      <option value="쇼핑/생활">🛍️ 쇼핑/생활</option>
+                      <option value="교통/차량">🚕 교통/차량</option>
+                      <option value="편의점/마트">🏪 편의점/마트</option>
+                      <option value="문화/여가">🎬 문화/여가</option>
+                      <option value="고정비/공과금">🏠 고정비/공과금</option>
+                      <option value="기타">📌 기타</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label class="font-bold text-slate-700 block mb-1">메모 (선택)</label>
+                    <input id="editMemo" type="text" class="w-full border border-slate-300 rounded-xl px-3 py-2" placeholder="메모 입력" />
+                  </div>
+                </div>
+                <div class="flex items-center justify-between pt-2">
+                  <button id="deleteBtn" onclick="deleteCurrentItem()" class="bg-rose-50 hover:bg-rose-100 text-rose-600 text-xs font-extrabold px-3 py-2 rounded-xl">🗑️ 삭제</button>
+                  <div class="flex gap-2 ml-auto">
+                    <button onclick="closeEditModal()" class="bg-slate-100 text-slate-600 text-xs font-bold px-3.5 py-2 rounded-xl">취소</button>
+                    <button onclick="saveEditModal()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-extrabold px-4 py-2 rounded-xl shadow">저장하기</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <script>
+              const STORAGE_KEY = 'SMART_EXPENSE_TREE_V1';
+              const CAT_META = {
+                '식비/카페': { icon: '🍽️', color: 'border-rose-300 bg-rose-50/70', rec: 0.30 },
+                '쇼핑/생활': { icon: '🛍️', color: 'border-indigo-300 bg-indigo-50/70', rec: 0.20 },
+                '고정비/공과금': { icon: '🏠', color: 'border-slate-300 bg-slate-100', rec: 0.25 },
+                '편의점/마트': { icon: '🏪', color: 'border-emerald-300 bg-emerald-50/70', rec: 0.15 },
+                '교통/차량': { icon: '🚕', color: 'border-amber-300 bg-amber-50/70', rec: 0.12 },
+                '문화/여가': { icon: '🎬', color: 'border-purple-300 bg-purple-50/70', rec: 0.10 },
+                '기타': { icon: '📌', color: 'border-gray-300 bg-gray-50', rec: 0.10 }
+              };
+
+              const todayStr = new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10);
+              const defaultYM = todayStr.slice(0, 7);
+
+              let state = loadState();
+
+              function loadState() {
+                try {
+                  const raw = localStorage.getItem(STORAGE_KEY);
+                  if (raw) return JSON.parse(raw);
+                } catch (e) {}
+                return {
+                  monthlyBudget: 600000,
+                  expenses: [
+                    { id: '1', date: defaultYM + '-01', category: '고정비/공과금', merchant: 'KT 통신요금 자동이체', amount: 65000, source: '💬 카톡 알림 인식', memo: '휴대폰 요금' },
+                    { id: '2', date: defaultYM + '-02', category: '식비/카페', merchant: '배달의민족(우아한형제들)', amount: 24000, source: '💬 카톡 알림 인식', memo: '저녁 배달' },
+                    { id: '3', date: defaultYM + '-03', category: '식비/카페', merchant: '스타벅스 역삼역점', amount: 11200, source: '📸 캡처 OCR 인식', memo: '아메리카노 & 샌드위치' },
+                    { id: '4', date: defaultYM + '-04', category: '쇼핑/생활', merchant: '쿠팡(Coupang)', amount: 48900, source: '📸 캡처 OCR 인식', memo: '생필품 구매' },
+                    { id: '5', date: defaultYM + '-05', category: '교통/차량', merchant: '카카오T 택시', amount: 15800, source: '💬 카톡 알림 인식', memo: '야간 귀가' }
+                  ]
+                };
+              }
+
+              function saveState() {
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+              }
+
+              function guessCategory(text) {
+                const t = String(text || '').toLowerCase();
+                if (/스타벅스|투썸|메가커피|컴포즈|이디야|카페|커피|배달의민족|우아한형제들|요기요|쿠팡이츠|식당|맥도날드|버거킹|김밥|치킨|피자/.test(t)) return '식비/카페';
+                if (/쿠팡|coupang|네이버페이|무신사|올리브영|다이소|11번가|지마켓|컬리|백화점|쇼핑/.test(t)) return '쇼핑/생활';
+                if (/택시|카카오t|코레일|srt|지하철|버스|티머니|주유|주차|하이패스/.test(t)) return '교통/차량';
+                if (/gs25|cu|세븐일레븐|이마트|홈플러스|롯데마트|편의점|마트/.test(t)) return '편의점/마트';
+                if (/cgv|메가박스|롯데시네마|넷플릭스|유튜브|멜론|교보문고|영화|게임/.test(t)) return '문화/여가';
+                if (/통신|kt|skt|lgu|관리비|전기|가스|수도|보험|월세/.test(t)) return '고정비/공과금';
+                return '식비/카페';
+              }
+
+              function parsePaymentText(rawText) {
+                const clean = String(rawText || '').replace(/\r/g, '');
+                const lines = clean.split('\n').map(l => l.trim()).filter(Boolean);
+                const joined = lines.join(' ');
+
+                let amount = 0;
+                const wonMatch = joined.match(/([0-9]{1,3}(?:,[0-9]{3})+|[0-9]{3,8})\s*원/);
+                if (wonMatch) amount = parseInt(wonMatch[1].replace(/,/g, ''), 10);
+                else {
+                  const numMatch = joined.match(/([0-9]{1,3}(?:,[0-9]{3})+)/);
+                  if (numMatch) amount = parseInt(numMatch[1].replace(/,/g, ''), 10);
+                }
+
+                let dateStr = todayStr;
+                const ymd = joined.match(/(20[0-9]{2})[-./](0[1-9]|1[0-2])[-./](0[1-9]|[12][0-9]|3[01])/);
+                if (ymd) dateStr = `${ymd[1]}-${ymd[2]}-${ymd[3]}`;
+
+                let merchant = '';
+                const labelMatch = clean.match(/(?:가맹점명?|사용처|결제처|매장명|상호명?)\s*[:：]\s*([^\n/]+)/);
+                if (labelMatch) {
+                  merchant = labelMatch[1].replace(/\*/g, '').trim();
+                } else {
+                  const smsMatch = clean.match(/(?:일시불|할부|승인|결제완료)\s+([가-힣A-Za-z0-9()_-\s]{2,22})/);
+                  if (smsMatch) merchant = smsMatch[1].trim();
+                  else {
+                    for (const line of lines) {
+                      if (/결제금액|결제일시|승인번호|잔액/.test(line)) continue;
+                      const s = line.replace(/\[[^\]]+\]/g, '').replace(/[0-9,]+원/g, '').replace(/20[0-9]{2}[-./][0-9]{2}[-./][0-9]{2}/g, '').trim();
+                      if (s.length >= 2) { merchant = s; break; }
+                    }
+                  }
+                }
+                if (!merchant) merchant = '인식된 사용처(터치해 수정)';
+                const category = guessCategory(merchant + ' ' + joined);
+                return { date: dateStr, amount: amount || 10000, merchant, category };
+              }
+
+              function switchTab(tab) {
+                ['tree', 'capture', 'kakao', 'eval'].forEach(t => {
+                  document.getElementById('panel-' + t).classList.toggle('hidden', t !== tab);
+                  const btn = document.getElementById('tabBtn-' + t);
+                  if (t === tab) {
+                    btn.className = 'py-2 rounded-xl text-xs sm:text-sm font-extrabold bg-white text-indigo-600 shadow-sm';
+                  } else {
+                    btn.className = 'py-2 rounded-xl text-xs sm:text-sm font-bold text-slate-600';
+                  }
+                });
+                renderAll();
+              }
+
+              function getFilteredExpenses() {
+                const ym = document.getElementById('monthPicker').value || defaultYM;
+                return state.expenses.filter(e => String(e.date || '').startsWith(ym));
+              }
+
+              function renderAll() {
+                const list = getFilteredExpenses();
+                const total = list.reduce((s, e) => s + Number(e.amount || 0), 0);
+                const budget = Number(state.monthlyBudget || 600000);
+                const ratio = budget > 0 ? Math.round((total / budget) * 100) : 0;
+
+                document.getElementById('statTotal').textContent = '₩' + total.toLocaleString();
+                document.getElementById('statBudgetSub').textContent = '목표 예산: ₩' + budget.toLocaleString();
+                document.getElementById('statRatio').textContent = ratio + '%';
+                document.getElementById('statProgress').style.width = Math.min(100, ratio) + '%';
+
+                const byCat = {};
+                const byMerch = {};
+                const merchCnt = {};
+                list.forEach(it => {
+                  const c = it.category || '기타';
+                  if (!byCat[c]) byCat[c] = { total: 0, items: [] };
+                  byCat[c].total += Number(it.amount || 0);
+                  byCat[c].items.push(it);
+                  const m = it.merchant || '미분류';
+                  byMerch[m] = (byMerch[m] || 0) + Number(it.amount || 0);
+                  merchCnt[m] = (merchCnt[m] || 0) + 1;
+                });
+
+                const sortedMerchs = Object.entries(byMerch).sort((a, b) => b[1] - a[1]);
+                if (sortedMerchs.length > 0) {
+                  document.getElementById('statTopMerchant').textContent = sortedMerchs[0][0];
+                  document.getElementById('statTopMerchantAmt').textContent = `총 ₩${sortedMerchs[0][1].toLocaleString()} (${merchCnt[sortedMerchs[0][0]]}회)`;
+                } else {
+                  document.getElementById('statTopMerchant').textContent = '내역 없음';
+                  document.getElementById('statTopMerchantAmt').textContent = '₩0';
+                }
+
+                // 1) 시각적 가계도(트리) 렌더링
+                const sortedCats = Object.entries(byCat).sort((a, b) => b[1].total - a[1].total);
+                let treeHtml = `
+                  <div class="flex flex-col items-center">
+                    <div onclick="openBudgetModal()" class="node-card bg-slate-900 text-white px-5 py-3 rounded-2xl shadow-md text-center border-2 border-indigo-400">
+                      <p class="text-[11px] text-indigo-300 font-bold">💰 내 돈의 총 지출 (터치해 예산 수정)</p>
+                      <p class="text-lg font-black">₩${total.toLocaleString()}</p>
+                      <p class="text-[11px] text-slate-300">예산 ₩${budget.toLocaleString()} 중 ${ratio}%</p>
+                    </div>
+                    <div class="tree-line-v h-5"></div>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 w-full">
+                `;
+                sortedCats.forEach(([cat, obj]) => {
+                  const meta = CAT_META[cat] || CAT_META['기타'];
+                  const pct = total > 0 ? Math.round((obj.total / total) * 100) : 0;
+                  treeHtml += `
+                    <div class="rounded-2xl border-2 ${meta.color} p-3 flex flex-col">
+                      <div class="flex items-center justify-between border-b border-slate-200/80 pb-2 mb-2">
+                        <span class="text-xs font-extrabold">${meta.icon} ${cat}</span>
+                        <span class="text-xs font-black text-slate-900">₩${obj.total.toLocaleString()} (${pct}%)</span>
+                      </div>
+                      <div class="space-y-1.5">
+                        ${obj.items.map(it => `
+                          <div onclick="openEditModal('${it.id}')" class="node-card bg-white rounded-xl p-2.5 border border-slate-200 flex items-center justify-between gap-2">
+                            <div class="min-w-0">
+                              <p class="text-xs font-extrabold text-slate-900 truncate">📍 ${it.merchant}</p>
+                              <p class="text-[10px] text-slate-500">${it.date.slice(5)} · ${it.source || '직접입력'}</p>
+                            </div>
+                            <div class="text-right shrink-0">
+                              <p class="text-xs font-black text-indigo-600">₩${Number(it.amount).toLocaleString()}</p>
+                              <span class="text-[10px] text-indigo-500 font-bold">✏️수정</span>
+                            </div>
+                          </div>
+                        `).join('')}
+                      </div>
+                    </div>
+                  `;
+                });
+                treeHtml += `</div></div>`;
+                document.getElementById('treeContainer').innerHTML = sortedCats.length ? treeHtml : '<p class="text-center text-xs text-slate-400 py-8">지출 내역이 없습니다. 캡처 업로드나 카톡 알림 인식으로 추가해 보세요!</p>';
+
+                // 2) 어디에 지출했는지 사용처 랭킹
+                document.getElementById('merchantRankList').innerHTML = sortedMerchs.map(([m, amt], idx) => `
+                  <div class="flex items-center justify-between bg-slate-50 rounded-xl px-3 py-2 border border-slate-200">
+                    <span class="font-bold text-slate-800 truncate">${idx + 1}. ${m} <span class="text-[10px] text-slate-400">(${merchCnt[m]}회)</span></span>
+                    <span class="font-extrabold text-slate-900">₩${amt.toLocaleString()}</span>
+                  </div>
+                `).join('') || '<p class="text-slate-400">내역 없음</p>';
+
+                // 3) 장부 리스트
+                document.getElementById('ledgerList').innerHTML = list.map(it => `
+                  <div onclick="openEditModal('${it.id}')" class="node-card bg-slate-50 rounded-xl p-2.5 border border-slate-200 flex items-center justify-between">
+                    <div>
+                      <p class="text-xs font-extrabold text-slate-900">${(CAT_META[it.category] || CAT_META['기타']).icon} ${it.merchant}</p>
+                      <p class="text-[11px] text-slate-500">${it.date} · ${it.category} · ${it.source || ''}</p>
+                    </div>
+                    <div class="text-right">
+                      <p class="text-xs font-black text-slate-900">₩${Number(it.amount).toLocaleString()}</p>
+                      <span class="text-[10px] text-indigo-600 font-bold">터치해 수정</span>
+                    </div>
+                  </div>
+                `).join('') || '<p class="text-xs text-slate-400">내역 없음</p>';
+
+                // 4) 월말 지출 평가 & 보완점 계산
+                let score = 94;
+                if (total > budget * 1.2) score -= 35;
+                else if (total > budget) score -= 18;
+
+                const tips = [];
+                if (total > budget) {
+                  tips.push(`🚨 <b>목표 예산 초과 (+₩${(total - budget).toLocaleString()})</b>: 예산 대비 지출이 초과되었습니다. 다음 달 첫 2주간 일일 지출 상한선을 ₩${Math.round(budget / 30).toLocaleString()}으로 설정하세요.`);
+                } else {
+                  tips.push(`✅ <b>예산 내 안정적 관리 (${ratio}% 사용)</b>: 남은 예산 <b>₩${(budget - total).toLocaleString()}</b>은 파킹통장이나 비상금 계좌로 이체해 저축률을 높이세요.`);
+                }
+
+                let barsHtml = '';
+                sortedCats.forEach(([cat, obj]) => {
+                  const meta = CAT_META[cat] || CAT_META['기타'];
+                  const share = total > 0 ? obj.total / total : 0;
+                  const sharePct = Math.round(share * 100);
+                  const recPct = Math.round(meta.rec * 100);
+                  const isOver = share > meta.rec + 0.08;
+                  if (isOver) {
+                    score -= 8;
+                    const cutAmt = Math.round(obj.total - total * meta.rec);
+                    tips.push(`⚠️ <b>[${cat}] 비중 과다 (${sharePct}% / 권장 ${recPct}% 이하)</b>: 다음 달 이 카테고리에서 약 <b>₩${cutAmt.toLocaleString()}</b>을 줄이면 지출 균형이 크게 개선됩니다.`);
+                  }
+                  barsHtml += `
+                    <div class="text-xs">
+                      <div class="flex justify-between font-bold mb-1">
+                        <span>${meta.icon} ${cat} (권장 ${recPct}% 이하)</span>
+                        <span class="${isOver ? 'text-rose-600' : 'text-slate-700'}">₩${obj.total.toLocaleString()} (${sharePct}%)</span>
+                      </div>
+                      <div class="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+                        <div class="${isOver ? 'bg-rose-500' : 'bg-indigo-600'} h-full" style="width:${Math.min(100, sharePct)}%"></div>
+                      </div>
+                    </div>
+                  `;
+                });
+
+                sortedMerchs.forEach(([m, amt]) => {
+                  if (merchCnt[m] >= 2) {
+                    tips.push(`🔍 <b>[${m}] 반복 지출 점검 (${merchCnt[m]}회 · 총 ₩${amt.toLocaleString()})</b>: 자주 지출하는 단골 사용처입니다. 월 결제 횟수를 1~2회만 줄여도 즉시 절약됩니다.`);
+                  }
+                });
+
+                score = Math.max(45, Math.min(99, score));
+                const grade = score >= 90 ? 'S등급' : score >= 80 ? 'A등급' : score >= 70 ? 'B등급' : 'C등급';
+                document.getElementById('statScore').textContent = `${score}점 (${grade})`;
+                document.getElementById('evalBigScore').textContent = `${score}점 (${grade})`;
+                document.getElementById('evalCategoryBars').innerHTML = barsHtml || '<p class="text-xs text-slate-400">데이터 없음</p>';
+                document.getElementById('evalTipsList').innerHTML = tips.map(t => `<div class="bg-slate-50 border border-slate-200 rounded-xl p-3 leading-relaxed">${t}</div>`).join('');
+              }
+
+              // 캡처 이미지 업로드 OCR
+              async function handleCaptureUpload(e) {
+                const file = e.target.files && e.target.files[0];
+                if (!file) return;
+                const box = document.getElementById('ocrStatusBox');
+                const txt = document.getElementById('ocrStatusText');
+                const pct = document.getElementById('ocrPctText');
+                const bar = document.getElementById('ocrProgressBar');
+                box.classList.remove('hidden');
+                txt.textContent = '🔍 캡처 이미지 한국어+영어 OCR 분석 중...';
+                try {
+                  const res = await Tesseract.recognize(file, 'kor+eng', {
+                    logger: m => {
+                      if (m.status === 'recognizing text') {
+                        const p = Math.round((m.progress || 0) * 100);
+                        pct.textContent = p + '%';
+                        bar.style.width = p + '%';
+                      }
+                    }
+                  });
+                  const parsed = parsePaymentText(res.data.text || '');
+                  addExpenseItem({ ...parsed, source: '📸 캡처 OCR 인식', memo: '캡처 이미지 자동 인식' });
+                  txt.textContent = `✅ 인식 완료! [${parsed.merchant}] ₩${parsed.amount.toLocaleString()} 가계도 반영됨`;
+                  setTimeout(() => { box.classList.add('hidden'); switchTab('tree'); }, 1100);
+                } catch (err) {
+                  alert('OCR 인식 중 오류가 발생해 기본값으로 등록 창을 엽니다.');
+                  box.classList.add('hidden');
+                  openEditModal(null);
+                }
+              }
+
+              function runSampleOcr(merchant, amount, category) {
+                addExpenseItem({ date: todayStr, merchant, amount, category, source: '📸 캡처 OCR 인식', memo: '샘플 캡처 인식' });
+                switchTab('tree');
+              }
+
+              function fillSampleKakao(n) {
+                const samples = {
+                  1: `[카카오페이] 결제 완료 안내\n- 결제금액: 24,000원\n- 가맹점: 배달의민족(우아한형제들)\n- 결제일시: ${todayStr} 19:30`,
+                  2: `[KB국민카드] 승인 안내\n일시불 32,400원\n사용처: CJ올리브영 강남본점\n결제일: ${todayStr}`,
+                  3: `[신한카드] 결제완료\n결제금액: 14,500원\n가맹점명: 카카오T택시\n일시: ${todayStr} 23:10`
+                };
+                document.getElementById('kakaoInput').value = samples[n];
+              }
+
+              function parseAndAddKakao() {
+                const raw = document.getElementById('kakaoInput').value.trim();
+                if (!raw) { alert('카카오톡 결제 알림 내용을 입력해 주세요!'); return; }
+                const parsed = parsePaymentText(raw);
+                addExpenseItem({ ...parsed, source: '💬 카톡 알림 인식', memo: '카톡 알림톡 파싱' });
+                document.getElementById('kakaoInput').value = '';
+                switchTab('tree');
+              }
+
+              function addExpenseItem(item) {
+                const nextId = String(state.expenses.reduce((m, x) => Math.max(m, parseInt(x.id, 10) || 0), 0) + 1);
+                state.expenses.unshift({ id: nextId, ...item });
+                saveState();
+                renderAll();
+              }
+
+              // 가계도 직접 수정 모달
+              function openEditModal(id) {
+                const modal = document.getElementById('editModal');
+                const delBtn = document.getElementById('deleteBtn');
+                if (id) {
+                  const target = state.expenses.find(x => String(x.id) === String(id));
+                  if (!target) return;
+                  document.getElementById('modalTitle').textContent = `✏️ 가계도 내역 수정 (#${target.id})`;
+                  document.getElementById('editId').value = target.id;
+                  document.getElementById('editMerchant').value = target.merchant;
+                  document.getElementById('editAmount').value = target.amount;
+                  document.getElementById('editDate').value = target.date;
+                  document.getElementById('editCategory').value = target.category;
+                  document.getElementById('editMemo').value = target.memo || '';
+                  delBtn.classList.remove('hidden');
+                } else {
+                  document.getElementById('modalTitle').textContent = '+ 가계도에 지출 직접 추가';
+                  document.getElementById('editId').value = '';
+                  document.getElementById('editMerchant').value = '';
+                  document.getElementById('editAmount').value = '';
+                  document.getElementById('editDate').value = todayStr;
+                  document.getElementById('editCategory').value = '식비/카페';
+                  document.getElementById('editMemo').value = '';
+                  delBtn.classList.add('hidden');
+                }
+                modal.classList.remove('hidden');
+                modal.classList.add('flex');
+              }
+
+              function closeEditModal() {
+                const modal = document.getElementById('editModal');
+                modal.classList.add('hidden');
+                modal.classList.remove('flex');
+              }
+
+              function saveEditModal() {
+                const id = document.getElementById('editId').value;
+                const merchant = document.getElementById('editMerchant').value.trim() || '미입력 사용처';
+                const amount = parseInt(document.getElementById('editAmount').value, 10) || 0;
+                const date = document.getElementById('editDate').value || todayStr;
+                const category = document.getElementById('editCategory').value;
+                const memo = document.getElementById('editMemo').value.trim();
+
+                if (id) {
+                  const target = state.expenses.find(x => String(x.id) === String(id));
+                  if (target) {
+                    target.merchant = merchant;
+                    target.amount = amount;
+                    target.date = date;
+                    target.category = category;
+                    target.memo = memo;
+                    target.source = '✏️ 내가 직접 수정';
+                  }
+                } else {
+                  addExpenseItem({ date, merchant, amount, category, memo, source: '✏️ 내가 직접 추가' });
+                }
+                saveState();
+                closeEditModal();
+                renderAll();
+              }
+
+              function deleteCurrentItem() {
+                const id = document.getElementById('editId').value;
+                if (!id) return;
+                state.expenses = state.expenses.filter(x => String(x.id) !== String(id));
+                saveState();
+                closeEditModal();
+                renderAll();
+              }
+
+              function openBudgetModal() {
+                const val = prompt('월 목표 예산을 입력하세요 (원):', state.monthlyBudget);
+                if (val !== null) {
+                  const num = parseInt(String(val).replace(/,/g, ''), 10);
+                  if (!isNaN(num) && num > 0) {
+                    state.monthlyBudget = num;
+                    saveState();
+                    renderAll();
+                  }
+                }
+              }
+
+              // 매월 마지막 날 판별 및 시뮬레이션
+              function checkIsLastDay() {
+                const now = new Date(Date.now() + 9 * 3600 * 1000);
+                const tomorrow = new Date(now.getTime() + 24 * 3600 * 1000);
+                if (tomorrow.getUTCDate() === 1) {
+                  document.getElementById('lastDayBanner').classList.remove('hidden');
+                }
+              }
+
+              function triggerLastDaySimulation() {
+                document.getElementById('lastDayBanner').classList.remove('hidden');
+                switchTab('eval');
+              }
+
+              // 안드로이드 네이티브 카톡 알림 브릿지 연동
+              function openAndroidNotifPermission() {
+                if (window.AndroidExpenseBridge && window.AndroidExpenseBridge.openNotificationSettings) {
+                  window.AndroidExpenseBridge.openNotificationSettings();
+                } else {
+                  alert('안드로이드 APK 설치 앱에서 작동하는 기능입니다. 웹에서는 아래 카톡 알림 붙여넣기를 이용해 주세요!');
+                }
+              }
+
+              function pullAndroidNotifications(manual) {
+                if (!window.AndroidExpenseBridge) {
+                  if (manual) alert('현재 브라우저 환경입니다. 안드로이드 APK 앱에서 실행하면 상단바 카톡 알림을 직접 읽어옵니다.');
+                  return;
+                }
+                try {
+                  const granted = window.AndroidExpenseBridge.isNotificationPermissionGranted();
+                  document.getElementById('androidPermStatus').textContent = granted
+                    ? '✅ 실시간 카톡 결제 알림 감지 켜짐 (자동으로 가계도에 반영됩니다)'
+                    : '⚠️ 알림 접근 권한이 꺼져 있습니다. 우측 [알림 권한 켜기]를 눌러 허용해 주세요.';
+
+                  const rawJson = window.AndroidExpenseBridge.scanAndGetNotifications();
+                  const arr = JSON.parse(rawJson || '[]');
+                  if (arr.length > 0) {
+                    arr.forEach(n => {
+                      const parsed = parsePaymentText(n.combined || n.text || '');
+                      if (parsed.amount > 0) {
+                        addExpenseItem({ ...parsed, source: '📲 실시간 카톡알림', memo: n.title || '' });
+                      }
+                    });
+                    window.AndroidExpenseBridge.clearNotifications();
+                    if (manual) alert(`${arr.length}건의 카톡 결제 알림을 가계도에 등록했습니다!`);
+                  } else if (manual) {
+                    alert('새로 감지된 카톡 결제 알림이 없습니다.');
+                  }
+                } catch (e) {}
+              }
+
+              // 초기화
+              document.getElementById('monthPicker').value = defaultYM;
+              checkIsLastDay();
+              renderAll();
+              setInterval(() => pullAndroidNotifications(false), 4000);
+            </script>
+          </body>
+          </html>
+          EOF_HTML
+
+      - name: 3. Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 4. Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: 5. Initialize Capacitor Android & Inject KakaoTalk Notification Listener
+        run: |
+          rm -rf node_modules package.json package-lock.json capacitor.config.* android
+          npm init -y
+          npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6
+          npx cap init SmartExpenseTree com.expensetree.app --web-dir www
+          npx cap add android
+
+          # 안드로이드 실시간 카카오톡/카드 알림 인식 서비스 생성
+          cat << 'EOF_SERVICE' > android/app/src/main/java/com/expensetree/app/KakaoNotificationService.java
+          package com.expensetree.app;
+
+          import android.app.Notification;
+          import android.content.Context;
+          import android.content.SharedPreferences;
+          import android.os.Bundle;
+          import android.service.notification.NotificationListenerService;
+          import android.service.notification.StatusBarNotification;
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+
+          public class KakaoNotificationService extends NotificationListenerService {
+              public static KakaoNotificationService instance;
+
+              @Override
+              public void onListenerConnected() {
+                  super.onListenerConnected();
+                  instance = this;
+                  scanCurrentNotifications();
+              }
+
+              @Override
+              public void onListenerDisconnected() {
+                  super.onListenerDisconnected();
+                  if (instance == this) instance = null;
+              }
+
+              @Override
+              public void onNotificationPosted(StatusBarNotification sbn) {
+                  processStatusBarNotification(sbn);
+              }
+
+              public void scanCurrentNotifications() {
+                  try {
+                      StatusBarNotification[] active = getActiveNotifications();
+                      if (active != null) {
+                          for (StatusBarNotification sbn : active) {
+                              processStatusBarNotification(sbn);
+                          }
+                      }
+                  } catch (Exception ignored) {}
+              }
+
+              private void processStatusBarNotification(StatusBarNotification sbn) {
+                  if (sbn == null) return;
+                  try {
+                      String pkg = sbn.getPackageName() != null ? sbn.getPackageName() : "";
+                      Notification notif = sbn.getNotification();
+                      if (notif == null || notif.extras == null) return;
+                      Bundle extras = notif.extras;
+
+                      CharSequence titleCs = extras.getCharSequence(Notification.EXTRA_TITLE);
+                      CharSequence textCs = extras.getCharSequence(Notification.EXTRA_TEXT);
+                      CharSequence bigTextCs = extras.getCharSequence(Notification.EXTRA_BIG_TEXT);
+
+                      String title = titleCs != null ? titleCs.toString() : "";
+                      String text = bigTextCs != null ? bigTextCs.toString() : (textCs != null ? textCs.toString() : "");
+                      String combined = (title + "\n" + text).trim();
+                      if (combined.isEmpty()) return;
+
+                      boolean isKakaoOrCard = pkg.contains("kakao") || pkg.contains("kbcard")
+                              || pkg.contains("shinhan") || pkg.contains("hyundai")
+                              || pkg.contains("samsung") || pkg.contains("woori")
+                              || pkg.contains("toss") || pkg.contains("nhcard");
+                      boolean hasPayWord = combined.contains("결제") || combined.contains("승인")
+                              || combined.contains("출금") || combined.contains("가맹점")
+                              || combined.contains("사용처") || combined.contains("원");
+
+                      if (!isKakaoOrCard || !hasPayWord) return;
+
+                      long postTime = sbn.getPostTime();
+                      String key = pkg + "_" + postTime + "_" + combined.hashCode();
+
+                      SharedPreferences prefs = getSharedPreferences("ExpenseNotifPrefs", Context.MODE_PRIVATE);
+                      JSONArray seenArr = new JSONArray(prefs.getString("seen_keys", "[]"));
+                      for (int i = 0; i < seenArr.length(); i++) {
+                          if (key.equals(seenArr.optString(i))) return;
+                      }
+                      seenArr.put(key);
+                      while (seenArr.length() > 120) seenArr.remove(0);
+
+                      JSONArray queueArr = new JSONArray(prefs.getString("notif_queue", "[]"));
+                      JSONObject item = new JSONObject();
+                      item.put("key", key);
+                      item.put("pkg", pkg);
+                      item.put("title", title);
+                      item.put("text", text);
+                      item.put("combined", combined);
+                      queueArr.put(item);
+
+                      prefs.edit()
+                          .putString("seen_keys", seenArr.toString())
+                          .putString("notif_queue", queueArr.toString())
+                          .apply();
+                  } catch (Exception ignored) {}
+              }
+          }
+          EOF_SERVICE
+
+          # MainActivity에 WebView JavascriptInterface 연결
+          cat << 'EOF_MAIN' > android/app/src/main/java/com/expensetree/app/MainActivity.java
+          package com.expensetree.app;
+
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.os.Bundle;
+          import android.provider.Settings;
+          import android.webkit.JavascriptInterface;
+          import android.webkit.WebView;
+          import com.getcapacitor.BridgeActivity;
+
+          public class MainActivity extends BridgeActivity {
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  if (this.bridge != null && this.bridge.getWebView() != null) {
+                      WebView webView = this.bridge.getWebView();
+                      webView.getSettings().setJavaScriptEnabled(true);
+                      webView.getSettings().setDomStorageEnabled(true);
+                      webView.addJavascriptInterface(new AndroidExpenseBridge(this), "AndroidExpenseBridge");
+                  }
+              }
+
+              public class AndroidExpenseBridge {
+                  private final Context ctx;
+                  public AndroidExpenseBridge(Context ctx) { this.ctx = ctx; }
+
+                  @JavascriptInterface
+                  public boolean isNotificationPermissionGranted() {
+                      try {
+                          String flat = Settings.Secure.getString(ctx.getContentResolver(), "enabled_notification_listeners");
+                          return flat != null && flat.contains(ctx.getPackageName());
+                      } catch (Exception e) { return false; }
+                  }
+
+                  @JavascriptInterface
+                  public void openNotificationSettings() {
+                      try {
+                          Intent intent = new Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS");
+                          intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                          ctx.startActivity(intent);
+                      } catch (Exception ignored) {}
+                  }
+
+                  @JavascriptInterface
+                  public String scanAndGetNotifications() {
+                      try {
+                          if (KakaoNotificationService.instance != null) {
+                              KakaoNotificationService.instance.scanCurrentNotifications();
+                          }
+                          SharedPreferences prefs = ctx.getSharedPreferences("ExpenseNotifPrefs", Context.MODE_PRIVATE);
+                          return prefs.getString("notif_queue", "[]");
+                      } catch (Exception e) { return "[]"; }
+                  }
+
+                  @JavascriptInterface
+                  public void clearNotifications() {
+                      try {
+                          SharedPreferences prefs = ctx.getSharedPreferences("ExpenseNotifPrefs", Context.MODE_PRIVATE);
+                          prefs.edit().putString("notif_queue", "[]").apply();
+                      } catch (Exception ignored) {}
+                  }
+              }
+          }
+          EOF_MAIN
+
+          # AndroidManifest.xml에 카톡 알림 리스너 서비스 등록
+          python3 -c '
+          p = "android/app/src/main/AndroidManifest.xml"
+          s = open(p, encoding="utf-8").read()
+          svc = """
+                  <service
+                      android:name=".KakaoNotificationService"
+                      android:label="스마트 지출 가계도 카톡 알림 인식"
+                      android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.service.notification.NotificationListenerService" />
+                      </intent-filter>
+                  </service>
+              </application>"""
+          open(p, "w", encoding="utf-8").write(s.replace("</application>", svc, 1))
+          '
+
+          npx cap sync android
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: 6. Upload Android APK Artifact (app-debug.apk)
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: 7. Upload Web App Artifact (index.html)
+        uses: actions/upload-artifact@v4
+        with:
+          name: expense-tree-web
+          path: www/index.html
